@@ -1,295 +1,392 @@
 #include <Servo.h>
 #include <DHT.h>
-#include <ArduinoJson.h>
 
-// Pin Analogici
-#define PIN_FUMO A2
-#define PIN_LUCE A0
+// ======================= PIN DEFINITIONS ====================
 
-// Motore sinistro
-#define PIN_PWM_S 2
-#define PIN_S1 3
-#define PIN_S2 4
+// Analog sensors
+#define PIN_SMOKE_SENSOR A2
+#define PIN_LIGHT_SENSOR A0
 
-// Motore destro
-#define PIN_D1 5
-#define PIN_D2 6
-#define PIN_PWM_D 7
-#define PIN_LUCE_EMERGENZA 26
+// Left motor
+#define PIN_PWM_LEFT 2
+#define PIN_LEFT_IN1 3
+#define PIN_LEFT_IN2 4
 
-// Sensori ultrasuoni
-#define PIN_TRIG_FRONTE 10
-#define PIN_ECHO_FRONTE 11
-#define PIN_TRIG_RETRO 12
-#define PIN_ECHO_RETRO 13
-#define PIN_TRIG_SINISTRA 14
-#define PIN_ECHO_SINISTRA 15
-#define PIN_TRIG_DESTRA 16
-#define PIN_ECHO_DESTRA 17
+// Right motor
+#define PIN_RIGHT_IN1 5
+#define PIN_RIGHT_IN2 6
+#define PIN_PWM_RIGHT 7
 
-// Costanti globali
-const int DISTANZA_MINIMA = 50;   // Distanza minima da un ostacolo in cm
-const int TEMPO_SVOLTA_90 = 2600; // Millisecondi per ruotare
-const bool DEBUG = false;          // Attiva i Print di debug
+// Emergency light
+#define PIN_EMERGENCY_LIGHT 26
 
-// Oggetti globali
-Servo servoPan;  // Servo per movimento orizzontale
-Servo servoTilt; // Servo per movimento verticale
-JsonDocument reportSensori;
-DHT sensoreTempUmidita(25, DHT11);
+// Ultrasonic sensors
+#define PIN_TRIG_FRONT 10
+#define PIN_ECHO_FRONT 11
+#define PIN_TRIG_BACK 12
+#define PIN_ECHO_BACK 13
+#define PIN_TRIG_LEFT 14
+#define PIN_ECHO_LEFT 15
+#define PIN_TRIG_RIGHT 16
+#define PIN_ECHO_RIGHT 17
 
-// Variabili globali
-uint8_t comandoAttuale = 3; // Comando corrente (default: stop)
+// ===================== GLOBAL OBJECTS =======================
+Servo servoPan;
+Servo servoTilt;
+HardwareSerial &SerialCom = Serial;
+DHT tempHumiditySensor(25, DHT11);
 
-void setup()
+// =================== GLOBAL VARIABLES =======================
+const bool DEBUG = false; // Enable debug logs
+
+int leftMotorSpeed = 90;  // 0–255
+int rightMotorSpeed = 94; // 0–255
+int cameraPanAngle = 0;
+int cameraTiltAngle = 0;
+
+enum RobotState
 {
-  //Serial.begin(9600);
-  Serial1.begin(9600);
-  sensoreTempUmidita.begin();
+  IDLE,
+  WARNING,
+  PHOTO,
+  AUTO,
+  MANUAL
+};
 
-  for (int i = 2; i < 8; i++)
-  {
-    pinMode(i, OUTPUT);
-  }
+RobotState robotState;
 
-  for (int i = 10; i < 17; i += 2)
-  {
-    pinMode(i, OUTPUT);
-  }
-
-  for (int i = 11; i < 18; i += 2)
-  {
-    pinMode(i, INPUT);
-  }
-
-  for (int i = 18; i < 25; i++)
-  {
-    pinMode(i, INPUT);
-  }
-
-  pinMode(PIN_LUCE_EMERGENZA, OUTPUT);
-
-  servoPan.attach(8);
-  servoTilt.attach(9);
-  resetPanTilt();
-
-  analogWrite(PIN_PWM_S, 90);
-  analogWrite(PIN_PWM_D, 94);
-}
-
-void loop()
+// ================== DEBUG UTILITY FUNCTION ==================
+void debugPrint(String msg)
 {
-  if (Serial1.available()) {
-    comandoAttuale = Serial1.read();
-  }
-  switch (comandoAttuale)
-  {
-  case 0:
-    fermaMotori();
-    muoviPanTilt();
-    inviaReportSensori();
-    comandoAttuale = 3;
-    break;
-
-  case 1:
-    resetPanTilt();
-    navigaAutomatica();
-    break;
-
-  case 2:
-    fermaMotori();
-    lampeggiaLuceEmergenza();
-    break;
-
-  case 3:
-    fermaMotori();
-    break;
-  }
-  delay(200);
-}
-
-void lampeggiaLuceEmergenza()
-{
-  digitalWrite(PIN_LUCE_EMERGENZA, HIGH);
-  delay(200);
-  digitalWrite(PIN_LUCE_EMERGENZA, LOW);
-  delay(200);
-}
-
-void navigaAutomatica()
-{
-  const float TOLLERANZA = 2.5;
-
-  static float distanzaPrecFrontale = 0;
-  static float distanzaPrecSinistra = 0;
-  static float distanzaPrecDestra = 0;
-  static float distanzaPrecPosteriore = 0;
-  static int contatoreBlocco = 0;
-
-  float distanzaFrontale = misuraDistanza(PIN_TRIG_FRONTE, PIN_ECHO_FRONTE);
-  float distanzaSinistra = misuraDistanza(PIN_TRIG_SINISTRA, PIN_ECHO_SINISTRA);
-  float distanzaDestra = misuraDistanza(PIN_TRIG_DESTRA, PIN_ECHO_DESTRA);
-  float distanzaPosteriore = misuraDistanza(PIN_TRIG_RETRO, PIN_ECHO_RETRO);
-
   if (DEBUG)
   {
-    Serial1.print("F: "); Serial1.print(distanzaFrontale);
-    Serial1.print(" S: "); Serial1.print(distanzaSinistra);
-    Serial1.print(" D: "); Serial1.print(distanzaDestra);
-    Serial1.print(" R: "); Serial1.println(distanzaPosteriore);
+    SerialCom.print("DEBUG: ");
+    SerialCom.println(msg);
   }
+}
 
-  bool fuoriPortata = distanzaFrontale >= 240 && distanzaSinistra >= 240 && distanzaDestra >= 240 && distanzaPosteriore >= 240;
-  bool bloccato = !fuoriPortata &&
-                  abs(distanzaFrontale - distanzaPrecFrontale) < TOLLERANZA &&
-                  abs(distanzaSinistra - distanzaPrecSinistra) < TOLLERANZA &&
-                  abs(distanzaDestra - distanzaPrecDestra) < TOLLERANZA &&
-                  abs(distanzaPosteriore - distanzaPrecPosteriore) < TOLLERANZA;
+// ===================== DATA STRUCTURES ======================
+struct EnvironmentalData
+{
+  float smoke;       // %
+  float light;       // Lux (approx.)
+  float temperature; // °C
+  float humidity;    // %
+};
 
-  contatoreBlocco = bloccato ? contatoreBlocco + 1 : 0;
+// ==================== MOVEMENT FUNCTIONS ====================
+void stopMotors()
+{
+  debugPrint("Motors stopped");
+  digitalWrite(PIN_LEFT_IN1, LOW);
+  digitalWrite(PIN_LEFT_IN2, LOW);
+  digitalWrite(PIN_RIGHT_IN1, LOW);
+  digitalWrite(PIN_RIGHT_IN2, LOW);
+}
 
-  if (contatoreBlocco >= 3)
+void moveForward()
+{
+  debugPrint("Moving forward");
+  digitalWrite(PIN_LEFT_IN1, LOW);
+  digitalWrite(PIN_LEFT_IN2, HIGH);
+  digitalWrite(PIN_RIGHT_IN1, LOW);
+  digitalWrite(PIN_RIGHT_IN2, HIGH);
+  analogWrite(PIN_PWM_LEFT, leftMotorSpeed);
+  analogWrite(PIN_PWM_RIGHT, rightMotorSpeed);
+}
+
+void moveBackward()
+{
+  debugPrint("Moving backward");
+  digitalWrite(PIN_LEFT_IN1, HIGH);
+  digitalWrite(PIN_LEFT_IN2, LOW);
+  digitalWrite(PIN_RIGHT_IN1, HIGH);
+  digitalWrite(PIN_RIGHT_IN2, LOW);
+  analogWrite(PIN_PWM_LEFT, leftMotorSpeed);
+  analogWrite(PIN_PWM_RIGHT, rightMotorSpeed);
+}
+
+void turnLeft(int turnDuration)
+{
+  debugPrint("Turning left");
+  digitalWrite(PIN_LEFT_IN1, HIGH);
+  digitalWrite(PIN_LEFT_IN2, LOW);
+  digitalWrite(PIN_RIGHT_IN1, LOW);
+  digitalWrite(PIN_RIGHT_IN2, HIGH);
+  analogWrite(PIN_PWM_LEFT, leftMotorSpeed);
+  analogWrite(PIN_PWM_RIGHT, rightMotorSpeed);
+  delay(turnDuration);
+}
+
+void turnRight(int turnDuration)
+{
+  debugPrint("Turning right");
+  digitalWrite(PIN_LEFT_IN1, LOW);
+  digitalWrite(PIN_LEFT_IN2, HIGH);
+  digitalWrite(PIN_RIGHT_IN1, HIGH);
+  digitalWrite(PIN_RIGHT_IN2, LOW);
+  analogWrite(PIN_PWM_LEFT, leftMotorSpeed);
+  analogWrite(PIN_PWM_RIGHT, rightMotorSpeed);
+  delay(turnDuration);
+}
+
+void setCameraAngles(uint8_t panAngle, uint8_t tiltAngle)
+{
+  debugPrint("Setting camera angles");
+  int panCurrent = servoPan.read(); 
+  int tiltCurrent = servoTilt.read();
+
+  int maxDelta = max(abs(panAngle - panCurrent), abs(tiltAngle - tiltCurrent));
+  int delayTime = map(maxDelta, 0, 180, 0, 2000);
+
+  servoPan.write(panAngle);
+  servoTilt.write(tiltAngle);
+
+  delay(delayTime); 
+}
+
+
+// ==================== SENSOR FUNCTIONS ======================
+EnvironmentalData readEnvironmentalSensors()
+{
+  EnvironmentalData data;
+  data.smoke = round((analogRead(PIN_SMOKE_SENSOR) * 100.0 / 1023.0) * 10) / 10.0;
+  data.light = analogRead(PIN_LIGHT_SENSOR) * 0.55 - 95.14;
+  data.temperature = tempHumiditySensor.readTemperature();
+  data.humidity = tempHumiditySensor.readHumidity();
+  return data;
+}
+
+void sendSensorReport()
+{
+  EnvironmentalData data = readEnvironmentalSensors();
+  SerialCom.print("{\"smoke\":");
+  SerialCom.print(data.smoke, 1);
+  SerialCom.print(",\"light\":");
+  SerialCom.print(data.light, 2);
+  SerialCom.print(",\"temperature\":");
+  SerialCom.print(data.temperature, 2);
+  SerialCom.print(",\"humidity\":");
+  SerialCom.print(data.humidity, 2);
+  SerialCom.println("}");
+}
+
+double measureDistance(int trigPin, int echoPin)
+{
+  const double MAX_DISTANCE = 300.0;
+  const unsigned long TIMEOUT_US = MAX_DISTANCE * 58.0;
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  long duration = pulseIn(echoPin, HIGH, TIMEOUT_US);
+  double distance = duration * 0.0343 / 2;
+  return (distance <= 0 || distance > MAX_DISTANCE) ? MAX_DISTANCE : distance;
+}
+
+void emergencyBlink()
+{
+  for (int i = 0; i < 12; i++)
   {
-    if (DEBUG) Serial1.println("Ostacolo persistente, manovra evasiva");
-    indietro();
+    digitalWrite(PIN_EMERGENCY_LIGHT, HIGH);
+    delay(200);
+    digitalWrite(PIN_EMERGENCY_LIGHT, LOW);
+    delay(400);
+  }
+}
+
+// ================== NAVIGATION FUNCTION =====================
+void autoNavigate()
+{
+  const float TOLERANCE = 2.5;
+  const int MIN_DISTANCE = 50;
+  const int TURN_DURATION = 2600;
+
+  static float prevFront = 0, prevLeft = 0, prevRight = 0, prevBack = 0;
+  static int stuckCounter = 0;
+
+  float front = measureDistance(PIN_TRIG_FRONT, PIN_ECHO_FRONT);
+  float left = measureDistance(PIN_TRIG_LEFT, PIN_ECHO_LEFT);
+  float right = measureDistance(PIN_TRIG_RIGHT, PIN_ECHO_RIGHT);
+  float back = measureDistance(PIN_TRIG_BACK, PIN_ECHO_BACK);
+
+  debugPrint("Distances: F=" + String(front) + " L=" + String(left) +
+             " R=" + String(right) + " B=" + String(back));
+
+  bool outOfRange = front >= 240 && left >= 240 && right >= 240 && back >= 240;
+  bool stuck = !outOfRange &&
+               abs(front - prevFront) < TOLERANCE &&
+               abs(left - prevLeft) < TOLERANCE &&
+               abs(right - prevRight) < TOLERANCE &&
+               abs(back - prevBack) < TOLERANCE;
+
+  stuckCounter = stuck ? stuckCounter + 1 : 0;
+
+  if (stuckCounter >= 3)
+  {
+    debugPrint("Persistent obstacle → evasive maneuver");
+    moveBackward();
     delay(700);
-    if (distanzaSinistra > distanzaDestra)
-      svoltaSinistra();
-    else
-      svoltaDestra();
-    contatoreBlocco = 0;
+    (left > right) ? turnLeft(TURN_DURATION) : turnRight(TURN_DURATION);
+    stuckCounter = 0;
   }
-  else if (distanzaFrontale >= DISTANZA_MINIMA)
+  else if (front >= MIN_DISTANCE)
   {
-    avanti();
+    moveForward();
   }
   else
   {
-    if (DEBUG) Serial1.println("Ostacolo frontale, decisione svolta");
-    fermaMotori();
+    debugPrint("Front obstacle → deciding turn");
+    stopMotors();
     delay(200);
-    if (distanzaSinistra >= DISTANZA_MINIMA && distanzaSinistra >= distanzaDestra)
-      svoltaSinistra();
-    else if (distanzaDestra >= DISTANZA_MINIMA)
-      svoltaDestra();
-    else if (distanzaPosteriore >= DISTANZA_MINIMA)
+    if (left >= MIN_DISTANCE && left >= right)
+      turnLeft(TURN_DURATION);
+    else if (right >= MIN_DISTANCE)
+      turnRight(TURN_DURATION);
+    else if (back >= MIN_DISTANCE)
     {
-      indietro();
+      moveBackward();
       delay(600);
     }
   }
 
-  distanzaPrecFrontale = distanzaFrontale;
-  distanzaPrecSinistra = distanzaSinistra;
-  distanzaPrecDestra = distanzaDestra;
-  distanzaPrecPosteriore = distanzaPosteriore;
+  prevFront = front;
+  prevLeft = left;
+  prevRight = right;
+  prevBack = back;
 }
 
-void fermaMotori()
+// ==================== SELF TEST =======================
+void selfTest()
 {
-  if (DEBUG) Serial1.println("Motori fermati");
-  digitalWrite(PIN_S1, LOW);
-  digitalWrite(PIN_S2, LOW);
-  digitalWrite(PIN_D1, LOW);
-  digitalWrite(PIN_D2, LOW);
+  debugPrint("\n=== SELF TEST START ===");
+
+  debugPrint("Testing motors...");
+  moveForward();
   delay(500);
-}
+  moveBackward();
+  delay(500);
+  stopMotors();
+  debugPrint("Motors OK");
 
-void avanti()
-{
-  if (DEBUG) Serial1.println("Movimento in avanti");
-  digitalWrite(PIN_S1, LOW);
-  digitalWrite(PIN_S2, HIGH);
-  digitalWrite(PIN_D1, LOW);
-  digitalWrite(PIN_D2, HIGH);
-}
+  debugPrint("Testing servos...");
+  setCameraAngles(0, 0);
+  delay(500);
+  setCameraAngles(180, 90);
+  delay(500);
+  setCameraAngles(90, 45);
+  delay(500);
+  setCameraAngles(90, 90);
+  debugPrint("Servos OK");
 
-void indietro()
-{
-  if (DEBUG) Serial1.println("Movimento indietro");
-  digitalWrite(PIN_S1, HIGH);
-  digitalWrite(PIN_S2, LOW);
-  digitalWrite(PIN_D1, HIGH);
-  digitalWrite(PIN_D2, LOW);
-}
+  debugPrint("Testing environmental sensors...");
+  EnvironmentalData env = readEnvironmentalSensors();
+  debugPrint("Smoke: ");
+  debugPrint(String(env.smoke, 2));
+  debugPrint("Light: ");
+  debugPrint(String(env.light, 2));
+  debugPrint("Temperature: ");
+  debugPrint(String(env.temperature, 2));
+  debugPrint("Humidity: ");
+  debugPrint(String(env.humidity, 2));
+  debugPrint("Environmental sensors OK");
 
-void svoltaSinistra()
-{
-  if (DEBUG) Serial1.println("Svolta a sinistra");
-  digitalWrite(PIN_S1, HIGH);
-  digitalWrite(PIN_S2, LOW);
-  digitalWrite(PIN_D1, LOW);
-  digitalWrite(PIN_D2, HIGH);
-  delay(TEMPO_SVOLTA_90);
-}
+  debugPrint("Testing ultrasonic sensors...");
+  debugPrint("Front: ");
+  debugPrint(String(measureDistance(PIN_TRIG_FRONT, PIN_ECHO_FRONT), 2));
+  debugPrint("Back: ");
+  debugPrint(String(measureDistance(PIN_TRIG_BACK, PIN_ECHO_BACK), 2));
+  debugPrint("Left: ");
+  debugPrint(String(measureDistance(PIN_TRIG_LEFT, PIN_ECHO_LEFT), 2));
+  debugPrint("Right: ");
+  debugPrint(String(measureDistance(PIN_TRIG_RIGHT, PIN_ECHO_RIGHT), 2));
+  debugPrint("Ultrasonic sensors OK");
 
-void svoltaDestra()
-{
-  if (DEBUG) Serial1.println("Svolta a destra");
-  digitalWrite(PIN_S1, LOW);
-  digitalWrite(PIN_S2, HIGH);
-  digitalWrite(PIN_D1, HIGH);
-  digitalWrite(PIN_D2, LOW);
-  delay(TEMPO_SVOLTA_90);
-}
-
-void resetPanTilt()
-{
-  servoPan.write(90);
-  servoTilt.write(90);
-  if (DEBUG)
+  debugPrint("Testing emergency light...");
+  for (int i = 0; i < 3; i++)
   {
-    Serial1.println("Pan/Tilt riposizionati a 90°");
+    digitalWrite(PIN_EMERGENCY_LIGHT, HIGH);
+    delay(200);
+    digitalWrite(PIN_EMERGENCY_LIGHT, LOW);
+    delay(200);
+  }
+  debugPrint("Emergency light OK");
+
+  debugPrint("=== SELF TEST COMPLETE ===\n");
+}
+
+// ==================== COMMAND HANDLER =======================
+void handleCommand(String cmd)
+{
+  if (cmd == "START")
+  {
+    robotState = AUTO;
+    setCameraAngles(cameraPanAngle, cameraTiltAngle);
+  }
+  else if (cmd == "STOP")
+  {
+    robotState = IDLE;
+    stopMotors();
+  }
+  else if (cmd == "WARNING")
+  {
+    robotState = IDLE;
+    stopMotors();
+    emergencyBlink();
+  }
+  else if (cmd == "PHOTO")
+  {
+    robotState = IDLE;
+    stopMotors();
+    setCameraAngles(random(0, 180), random(45, 85));
+    sendSensorReport();
+  }
+  else
+  {
+    debugPrint("Comando non riconosciuto: " + cmd);
   }
 }
 
-void muoviPanTilt()
+// ========================= SETUP ============================
+void setup()
 {
-  uint8_t angoloPan = random(0, 180);
-  uint8_t angoloTilt = random(45, 85);
-  if (DEBUG)
-  {
-    Serial1.print("\nPan: "); Serial1.println(angoloPan);
-    Serial1.print("Tilt: "); Serial1.println(angoloTilt);
-  }
-  servoPan.write(angoloPan);
-  servoTilt.write(angoloTilt);
+  SerialCom.begin(115200);
+  tempHumiditySensor.begin();
+
+  for (int i = 2; i < 8; i++)
+    pinMode(i, OUTPUT); // Motor pins
+  for (int i = 10; i < 17; i += 2)
+    pinMode(i, OUTPUT); // Ultrasonic trig
+  for (int i = 11; i < 18; i += 2)
+    pinMode(i, INPUT); // Ultrasonic echo
+  for (int i = 18; i < 25; i++)
+    pinMode(i, INPUT); // Analog pins
+  pinMode(PIN_EMERGENCY_LIGHT, OUTPUT);
+
+  servoPan.attach(8);
+  servoTilt.attach(9);
+
+  selfTest();
+
+  setCameraAngles(cameraPanAngle, cameraTiltAngle);
+  analogWrite(PIN_PWM_LEFT, leftMotorSpeed);
+  analogWrite(PIN_PWM_RIGHT, rightMotorSpeed);
+
+  robotState = IDLE;
 }
 
-void inviaReportSensori()
+// ========================== LOOP ============================
+void loop()
 {
-  float fumo = analogRead(PIN_FUMO) * 100.0 / 1023.0;
-  float luce = analogRead(PIN_LUCE) * 0.55 - 95.14;
-  float temperatura = sensoreTempUmidita.readTemperature();
-  float umidita = sensoreTempUmidita.readHumidity();
-
-  reportSensori["fumo"] = round(fumo * 10) / 10.0;
-  reportSensori["luce"] = luce;
-  reportSensori["temperatura"] = temperatura;
-  reportSensori["umidita"] = umidita;
-
-  serializeJson(reportSensori, Serial1);
-  Serial1.println();
-}
-
-double misuraDistanza(int pinTrigger, int pinEcho)
-{
-  const double DISTANZA_MASSIMA = 300.0;
-  const unsigned long TIMEOUT_US = DISTANZA_MASSIMA * 58.0;
-
-  digitalWrite(pinTrigger, LOW);
-  delayMicroseconds(2);
-  digitalWrite(pinTrigger, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(pinTrigger, LOW);
-
-  long durata = pulseIn(pinEcho, HIGH, TIMEOUT_US);
-  double distanza = durata * 0.0343 / 2;
-
-  if (distanza <= 0 || distanza > DISTANZA_MASSIMA)
+  if (SerialCom.available() > 0)
   {
-    return DISTANZA_MASSIMA;
+    String cmd = SerialCom.readStringUntil('\n');
+    cmd.trim();
+    handleCommand(cmd);
+    debugPrint("Comando: " + cmd);
   }
 
-  return distanza;
+  if (robotState == AUTO)
+    autoNavigate();
 }
