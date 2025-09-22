@@ -9,19 +9,24 @@ from gtts import gTTS
 from io import BytesIO
 import inspect
 import locale
-import platform
 from datetime import datetime
-import threading
 import pygame
 
 locale.setlocale(locale.LC_TIME, "it_IT.utf8")
+os.environ["SDL_AUDIODRIVER"] = "alsa"
+os.environ["AUDIODEV"] = "hw:0,0"
+
+client = OpenAI(api_key="KEY")
+
 
 def get_timestamp():
     return datetime.now().strftime("%A %d %B %Y - %H:%M:%S")
 
+
 # ==============================================
 # UTILITIES
 # ==============================================
+
 
 def log(msg, level="INFO", end="\n"):
     colors = {
@@ -40,14 +45,16 @@ def log(msg, level="INFO", end="\n"):
         end=end,
     )
 
+
 # ==============================================
 # AUDIO FUNCTIONS
 # ==============================================
 
-def speak(text, language="it"):
+
+def speak(text):
     pygame.mixer.init()
     audio_buffer = BytesIO()
-    tts = gTTS(text, lang=language)
+    tts = gTTS(text, lang="it")
     tts.write_to_fp(audio_buffer)
     audio_buffer.seek(0)
     pygame.mixer.music.load(audio_buffer)
@@ -56,14 +63,15 @@ def speak(text, language="it"):
         pygame.time.Clock().tick(10)
 
 
-
 def play_shutter_sound():
     sound = pygame.mixer.Sound("camera_shutter_sound.wav")
     sound.play()
 
+
 # ==============================================
 # CAMERA FUNCTIONS
 # ==============================================
+
 
 def find_camera(max_index=10):
     for i in range(max_index):
@@ -90,8 +98,9 @@ def find_camera(max_index=10):
     log("Nessuna webcam disponibile trovata.")
     return None
 
+
 def take_photo():
-    cam_idx = find_camera()
+    cam_idx = 0
     if cam_idx is None:
         return None
 
@@ -129,13 +138,16 @@ def take_photo():
 
     return photo_path
 
+
 def img_to_base64(img_path):
     with open(img_path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
 
+
 # ==============================================
 # SERIAL FUNCTIONS
 # ==============================================
+
 
 def init_serial(port, baud_rate):
     try:
@@ -146,6 +158,7 @@ def init_serial(port, baud_rate):
         log(f"Errore di connessione seriale: {e}")
         return None
 
+
 def read_serial(ser):
     try:
         if ser.in_waiting > 0:
@@ -154,114 +167,106 @@ def read_serial(ser):
         log(f"Errore di comunicazione seriale: {e}")
         return None
 
-def serial_monitor(ser):
-    while True:
-        try:
-            if ser.in_waiting > 0:
-                line = ser.readline().decode("utf-8", errors="ignore").strip()
-                if line:
-                    log(line, level="DEBUG")
-        except Exception as e:
-            log(f"Errore lettura seriale: {e}", level="ERROR")
-            break
+
+def write_serial(ser, text):
+    if ser is None:
+        log("Seriale non inizializzata", level="ERROR")
+        return
+    try:
+        ser.write(f"{text}\n".encode())
+        log(f"Messaggio inviato: {text}", level="DEBUG")
+    except Exception as e:
+        log(f"Errore invio seriale: {e}", level="ERROR")
+
 
 # ==============================================
 # SAFETY ANALYSIS
 # ==============================================
 
-def analyze_safety(img_path, client, sensor_data):
+def openai_responses(img_path, client, sensor_data):
     prompt = (
-        "Sei un sistema di monitoraggio per la sicurezza sul lavoro, progettato per l'ASP di Catania. "
-        "Analizza i dati dei sensori e l'immagine per rilevare rischi secondo il D.Lgs. 81/2008. "
-        "Individua solo pericoli reali per la salute o sicurezza dei lavoratori. "
-        "Rispondi in modo breve e sintetico: indica il problema e come risolverlo o prevenirlo. "
-        "Non usare markdown. "
-        "Limiti da rispettare:\n"
+        "Agisci come un sistema di monitoraggio della sicurezza sul lavoro, progettato per l’ASP di Catania. "
+        "Analizza i dati dei sensori e l’immagine acquisita, individuando solo rischi reali "
+        "per la salute o la sicurezza dei lavoratori in base al D.Lgs. 81/2008. "
+        "Linee guida da seguire:\n"
         "- Fumo: rischio oltre 30 ppm (art. 27)\n"
         "- Luce: minimo 300 lux (Allegato XXXVI)\n"
         "- Temperatura: tra 18°C e 24°C (art. 72)\n"
-        "Se rilevi condizioni pericolose, descrivile. "
-        "Alla fine, indica un solo livello di pericolo: LOW, MEDIUM o HIGH. "
-        "Esempio: Attenzione: Rilevata una Temperatura di 28°C, rischio di malesseri. Raffreddare l'ambiente. MEDIUM\n"
-        f"Dati sensori:\n{sensor_data}"
+        "Istruzioni per la risposta:\n"
+        "- Frasi brevi e chiare\n"
+        "- Solo pericoli reali\n"
+        "- Indicazioni preventive\n"
+        "- Nessun markdown\n"
+        "- Concludi con un solo livello di pericolo: LOW, MEDIUM o HIGH\n"
+        "Esempio: Attenzione: rilevata Temperatura di 28°C, rischio di malesseri. Raffreddare l’ambiente. MEDIUM"
     )
 
     response = client.responses.create(
-        model="gpt-4o",
+        model="gpt-5",
+        reasoning={"effort": "low"},
+        instructions=prompt,
         input=[
             {
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": prompt},
+                    {"type": "input_text", "text": f"Dati sensori: {sensor_data}"},
                     {
                         "type": "input_image",
-                        "image_url": f"data:image/jpeg;base64,{img_to_base64(img_path)}",
-                    },
-                ],
+                        "image_url": f"data:image/jpeg;base64,{img_to_base64(img_path)}"
+                    }
+                ]
             }
-        ],
-        temperature=0.0,
+        ]
     )
 
-    content = response.output_text
-    last_word = content.split()[-1].upper()
-    danger = last_word if last_word in {"LOW", "MEDIUM", "HIGH"} else "UNKNOWN"
-    message = " ".join(content.split()[:-1])
+    return response.output_text
 
-    return message, danger
 
 # ==============================================
 # MAIN FUNCTION
 # ==============================================
 
-def safety_monitor():
-    SERIAL_MAIN = "/dev/ttyACM0"
-    SERIAL_DEBUG = "/dev/ttyAMA0"
-    client = OpenAI(api_key="API KEY")
 
-    main_ser = init_serial(SERIAL_DEBUG, 9600)
-
-    if main_ser is None:
-        return
-
+if __name__ == "__main__":
+    speak("Avvio safer")
+    serial_com = init_serial("/dev/ttyAMA0", 115200)
+    TIME = 20
 
     try:
         while True:
             log("Avvio ciclo di monitoraggio")
-            main_ser.write(bytes([1]))  # Start sensors
 
-            time.sleep(10)
-
-            main_ser.write(bytes([0]))  # Stop sensors
+            write_serial(serial_com, "START")
+            time.sleep(TIME)
+            write_serial(serial_com, "PHOTO")
 
             while True:
                 log("In attesa di dati dai sensori...")
-                time.sleep(10)
-                data = read_serial(main_ser)
+                time.sleep(1)
+                data = read_serial(serial_com)
 
-                if data:
+                if data and "{" in data:
                     log(f"Dati sensori ricevuti: {data}")
 
                     photo = take_photo()
                     if photo:
-                        analysis, level = analyze_safety(photo, client, data)
+                        level = "LOW"
+                        response = openai_responses(photo, client, data)
 
-                        log(f"Analisi sicurezza: {analysis} - Livello: {level}")
+                        log(f"Analisi sicurezza: {response} - Livello: {level}")
 
                         if level == "LOW":
                             log("Nessun rischio significativo rilevato")
-                        elif level in ("MEDIUM", "HIGH"):
-                            main_ser.write(bytes([2]))  # Attiva allarme
-                            speak(analysis)  # Annuncia l'avviso
+                        if level in ("MEDIUM", "HIGH"):
+                            write_serial(serial_com, "WARNING")
+
+                            speak(response)  # Annuncia l'avviso
                         break
 
     except KeyboardInterrupt:
         log("Monitoraggio interrotto")
-        main_ser.write(bytes([0]))  # Ferma sensori
+        write_serial(serial_com, "STOP")
 
     finally:
         log("Monitoraggio terminato")
-        main_ser.close()
-
-if __name__ == "__main__":
-    safety_monitor()
+        serial_com.close()
