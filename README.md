@@ -202,14 +202,7 @@ Il progetto ha seguito un approccio iterativo basato su cicli di sviluppo Agile,
 **Supervisione Didattica**
 - Prof. Misenti Francesco - Coordinamento progetto, sicurezza industriale, conformità normativa D.Lgs. 81/08
 - Prof. Vallelunga Angelo - Elettronica applicata, automazione industriale, validazione tecnica
-
----
-
-**Note sulle competenze specifiche:**
-- Nicolò Lo Cicero: Sviluppo completo del codice Arduino (gestione sensori, motori, navigazione) e Python (integrazione AI, elaborazione immagini, comunicazione seriale)
-- Fabrizio Gentile: Programmazione low-level Arduino, ottimizzazione prestazioni, implementazione sistema di acquisizione video e streaming
-- Team congiunto: Progettazione elettronica, selezione componenti, integrazione hardware/software e testing completo del sistema
-
+  
 ---
 
 ## 📋 Documentazione Tecnica del Codice
