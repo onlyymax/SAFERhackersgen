@@ -16,7 +16,7 @@ locale.setlocale(locale.LC_TIME, "it_IT.utf8")
 os.environ["SDL_AUDIODRIVER"] = "alsa"
 os.environ["AUDIODEV"] = "hw:0,0"
 
-client = OpenAI(api_key="KEY")
+client = OpenAI(api_key="CHIAVE")
 
 
 def get_timestamp():
